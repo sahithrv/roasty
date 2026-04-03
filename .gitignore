@@ -1,0 +1,24 @@
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+
+# virtualenv
+.venv/
+venv/
+
+# env files / secrets
+.env
+**/.env
