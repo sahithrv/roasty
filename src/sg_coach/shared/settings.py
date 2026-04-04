@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     commentary_enabled: bool = True
 
     grok_model: str = "grok-4-1-fast-reasoning"
+    grok_api_base_url: str = "https://api.x.ai/v1"
+    grok_timeout_seconds: int = Field(default=60, ge=5, le=3600)
     grok_api_key: str | None = None
 
     @property

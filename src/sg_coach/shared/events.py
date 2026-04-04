@@ -79,3 +79,14 @@ class CommentaryRequest(BaseModel):
     include_frame: bool = False
     frame_path: str | None = None
     context_frame_paths: list[str] = Field(default_factory=list)
+
+
+class CommentaryResult(BaseModel):
+    """The model output produced from a `CommentaryRequest`."""
+
+    result_id: str = Field(default_factory=lambda: new_id("commentary_result"))
+    request_id: str
+    event_id: str
+    model: str
+    text: str
+    raw_response: dict[str, Any] = Field(default_factory=dict)

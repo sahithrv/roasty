@@ -12,9 +12,14 @@ from sg_coach.detectors.worker import detector_worker
 from sg_coach.fusion.demo import DemoPassthroughFuser
 from sg_coach.fusion.worker import fusion_worker
 from sg_coach.memory.worker import memory_snapshot_sink, memory_worker
-from sg_coach.orchestrator.commentary import commentary_request_sink, commentary_request_worker
+from sg_coach.orchestrator.commentary import (
+    commentary_model_worker,
+    commentary_request_worker,
+    commentary_result_sink,
+)
 from sg_coach.orchestrator.session import SessionRuntime
 from sg_coach.orchestrator.topics import (
+    COMMENTARY_READY,
     COMMENTARY_REQUEST,
     EVENT_GAME,
     FRAME_RAW,
@@ -75,7 +80,7 @@ async def event_sink(
         )
 
 
-async def run_gta_wasted_pipeline(*, frame_count: int = 400) -> None:
+async def run_gta_wasted_pipeline(*, frame_count: int = 300) -> None:
     """Run the first GTA-specific live pipeline.
 
     This is the first realistic detector test path:
@@ -96,7 +101,9 @@ async def run_gta_wasted_pipeline(*, frame_count: int = 400) -> None:
       -> memory_worker
       -> commentary_request_worker
       -> COMMENTARY_REQUEST
-      -> commentary_request_sink
+      -> commentary_model_worker
+      -> COMMENTARY_READY
+      -> commentary_result_sink
     """
     settings = load_settings()
     runtime = SessionRuntime.create(settings)
@@ -116,6 +123,7 @@ async def run_gta_wasted_pipeline(*, frame_count: int = 400) -> None:
     commentary_event_queue = runtime.subscribe(EVENT_GAME)
     memory_snapshot_queue = runtime.subscribe(MEMORY_UPDATED)
     commentary_request_queue = runtime.subscribe(COMMENTARY_REQUEST)
+    commentary_result_queue = runtime.subscribe(COMMENTARY_READY)
 
     logger.info(
         "gta wasted pipeline starting session_id=%s monitor_id=%s target_fps=%s replay_seconds=%s template=%s threshold=%.3f confirm_frames=%s debug_threshold=%.3f commentary_frames=%s",
@@ -151,8 +159,10 @@ async def run_gta_wasted_pipeline(*, frame_count: int = 400) -> None:
             replay_buffer=replay_buffer,
             output_root=settings.debug_frames_dir / "commentary_context",
         ),
-        # Dump the exact Grok-style payload to disk so it can be inspected.
-        commentary_request_sink(commentary_request_queue, runtime=runtime),
+        # Send the built request to Grok and publish the resulting commentary.
+        commentary_model_worker(commentary_request_queue, runtime=runtime),
+        # Dump the actual response JSON and final line of commentary to disk.
+        commentary_result_sink(commentary_result_queue, runtime=runtime),
     )
 
     logger.info("gta wasted pipeline finished session_id=%s", runtime.session_id)

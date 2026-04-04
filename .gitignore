@@ -22,3 +22,7 @@ venv/
 # env files / secrets
 .env
 **/.env
+
+# data debug
+data/debug_commentary
+data/debug_frames

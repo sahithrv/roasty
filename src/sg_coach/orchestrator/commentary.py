@@ -5,11 +5,12 @@ import json
 from pathlib import Path
 
 from sg_coach.capture.replay_buffer import ReplayFrameBuffer
+from sg_coach.grok.client import GrokChatClient
 from sg_coach.grok.payloads import build_grok_chat_payload
 from sg_coach.memory.store import MemorySnapshot
 from sg_coach.orchestrator.session import SessionRuntime
-from sg_coach.orchestrator.topics import COMMENTARY_REQUEST
-from sg_coach.shared.events import CommentaryRequest, GameEvent
+from sg_coach.orchestrator.topics import COMMENTARY_READY, COMMENTARY_REQUEST
+from sg_coach.shared.events import CommentaryRequest, CommentaryResult, GameEvent
 from sg_coach.shared.logging import get_logger
 from sg_coach.shared.streaming import COMMENTARY_STREAM_COMPLETE, EVENT_STREAM_COMPLETE
 
@@ -163,38 +164,104 @@ async def commentary_request_worker(
         )
 
 
-async def commentary_request_sink(
+async def commentary_model_worker(
     request_queue: asyncio.Queue[CommentaryRequest | str],
     *,
     runtime: SessionRuntime,
 ) -> None:
-    """Debug sink that shows exactly what would be sent to Grok.
+    """Consume `CommentaryRequest`s, call Grok, and publish `CommentaryResult`.
 
-    This sink is intentionally transparent:
-    - it logs a concise summary
-    - it writes the full model payload to disk as JSON
-    - it does not call the network
+    The request JSON is always written to disk first so the exact prompt can be
+    inspected even if the network call fails.
     """
+    client = None
+    if runtime.settings.commentary_enabled and runtime.settings.grok_api_key:
+        client = GrokChatClient.from_settings(runtime.settings)
+
     while True:
         item = await request_queue.get()
         if item == COMMENTARY_STREAM_COMPLETE:
-            logger.info("commentary request sink complete")
+            await runtime.publish(COMMENTARY_READY, COMMENTARY_STREAM_COMPLETE)
+            logger.info("commentary model worker complete")
             return
 
         request = item
         payload = build_grok_chat_payload(request, model=runtime.settings.grok_model)
-        dump_path = _write_commentary_debug_payload(
+        request_dump_path = _write_commentary_debug_payload(
             request=request,
             payload=payload,
             output_root=runtime.settings.debug_commentary_dir,
             session_id=runtime.session_id,
         )
+
+        if not runtime.settings.commentary_enabled:
+            logger.info("commentary disabled; request dumped only path=%s", request_dump_path)
+            continue
+
+        if client is None:
+            logger.warning("commentary client unavailable; request dumped only path=%s", request_dump_path)
+            continue
+
+        try:
+            response_json = await asyncio.to_thread(client.create_chat_completion, payload)
+            response_text = client.extract_text(response_json)
+        except Exception as exc:
+            error_dump_path = _write_commentary_error_dump(
+                request=request,
+                error_message=str(exc),
+                output_root=runtime.settings.debug_commentary_dir,
+                session_id=runtime.session_id,
+            )
+            logger.exception(
+                "commentary model call failed request_id=%s request_dump=%s error_dump=%s",
+                request.request_id,
+                request_dump_path,
+                error_dump_path,
+            )
+            continue
+
+        result = CommentaryResult(
+            request_id=request.request_id,
+            event_id=request.latest_event.event_id,
+            model=runtime.settings.grok_model,
+            text=response_text,
+            raw_response=response_json,
+        )
+        await runtime.publish(COMMENTARY_READY, result)
         logger.info(
-            "commentary payload prepared request_id=%s event_type=%s context_frames=%s dump=%s",
+            "commentary payload sent request_id=%s event_type=%s context_frames=%s request_dump=%s",
             request.request_id,
             request.latest_event.event_type,
             len(request.context_frame_paths),
-            dump_path,
+            request_dump_path,
+        )
+
+
+async def commentary_result_sink(
+    result_queue: asyncio.Queue[CommentaryResult | str],
+    *,
+    runtime: SessionRuntime,
+) -> None:
+    """Write actual model output to disk and log the generated commentary."""
+    while True:
+        item = await result_queue.get()
+        if item == COMMENTARY_STREAM_COMPLETE:
+            logger.info("commentary result sink complete")
+            return
+
+        result = item
+        response_dump_path, text_dump_path = _write_commentary_result_dumps(
+            result=result,
+            output_root=runtime.settings.debug_commentary_dir,
+            session_id=runtime.session_id,
+        )
+        logger.info(
+            "commentary result ready request_id=%s model=%s text=%s response_dump=%s text_dump=%s",
+            result.request_id,
+            result.model,
+            result.text,
+            response_dump_path,
+            text_dump_path,
         )
 
 
@@ -211,4 +278,51 @@ def _write_commentary_debug_payload(
 
     output_path = output_dir / f"{request.request_id}.json"
     output_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    return output_path
+
+
+def _write_commentary_result_dumps(
+    *,
+    result: CommentaryResult,
+    output_root: Path,
+    session_id: str,
+) -> tuple[Path, Path]:
+    """Write the raw response JSON and the plain commentary text to disk."""
+    output_dir = output_root / session_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    response_dump_path = output_dir / f"{result.request_id}_response.json"
+    response_dump_path.write_text(
+        json.dumps(result.raw_response, indent=2, default=str),
+        encoding="utf-8",
+    )
+
+    text_dump_path = output_dir / f"{result.request_id}_text.txt"
+    text_dump_path.write_text(result.text, encoding="utf-8")
+    return response_dump_path, text_dump_path
+
+
+def _write_commentary_error_dump(
+    *,
+    request: CommentaryRequest,
+    error_message: str,
+    output_root: Path,
+    session_id: str,
+) -> Path:
+    """Write API errors to disk so failures are inspectable after the run."""
+    output_dir = output_root / session_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path = output_dir / f"{request.request_id}_error.json"
+    output_path.write_text(
+        json.dumps(
+            {
+                "request_id": request.request_id,
+                "event_id": request.latest_event.event_id,
+                "error": error_message,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     return output_path
