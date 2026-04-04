@@ -1,0 +1,1 @@
+"""GTA-focused detector pack."""

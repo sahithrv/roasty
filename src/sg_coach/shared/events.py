@@ -78,4 +78,4 @@ class CommentaryRequest(BaseModel):
     memory_summary: str = ""
     include_frame: bool = False
     frame_path: str | None = None
-
+    context_frame_paths: list[str] = Field(default_factory=list)

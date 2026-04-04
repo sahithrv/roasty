@@ -13,6 +13,7 @@ def ensure_runtime_dirs(settings: Settings) -> None:
         settings.sessions_dir,
         settings.debug_frames_dir,
         settings.debug_clips_dir,
+        settings.debug_commentary_dir,
     ):
         Path(path).mkdir(parents=True, exist_ok=True)
 
@@ -35,4 +36,3 @@ def bootstrap() -> Settings:
         },
     )
     return settings
-
