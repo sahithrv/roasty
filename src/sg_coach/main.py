@@ -40,11 +40,13 @@ def wait_for_user_ready(game_name: str) -> bool:
     return response not in {"q", "quit", "exit"}
 
 
-def run_gta_session() -> int:
+def run_gta_session(settings) -> int:
     """Run the continuous GTA detector session until the user stops it."""
     print()
     print("Starting GTA detectors.")
     print("They will keep running until you stop the program with Ctrl+C.")
+    if settings.realtime_enabled and settings.realtime_enable_user_speech:
+        print(f"Hold {settings.realtime_push_to_talk_key!r} to talk to the realtime companion.")
     print()
 
     try:
@@ -86,7 +88,7 @@ def main() -> int:
         if not wait_for_user_ready("GTA"):
             print("Cancelled before detectors started.")
             return 0
-        return run_gta_session()
+        return run_gta_session(settings)
 
     # Defensive fallback: the selection helper should already normalize inputs.
     print("No valid game selected.")

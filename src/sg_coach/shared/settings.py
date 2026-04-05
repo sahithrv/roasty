@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     realtime_play_audio: bool = True
     realtime_output_sample_rate: int = Field(default=24000, ge=8000, le=48000)
     realtime_audio_device: str | None = None
+    realtime_enable_user_speech: bool = True
+    realtime_input_sample_rate: int = Field(default=24000, ge=8000, le=48000)
+    realtime_input_audio_device: str | None = None
+    realtime_push_to_talk_key: str = "right alt"
     realtime_emit_commentary: bool = True
     realtime_emit_speech_cues: bool = True
     realtime_speech_cue_min_interval_seconds: int = Field(default=180, ge=0, le=3600)

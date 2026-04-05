@@ -64,6 +64,179 @@ def build_realtime_text_from_speech_cue(cue: SpeechCue) -> str:
     return f"GAME_EVENT: ambient scene update. {cue.text}"
 
 
+def _build_voice_state() -> dict[str, bool]:
+    """Create the mutable session-local arbitration state for voice interactions."""
+    return {
+        "ptt_active": False,
+        "buffering_user_audio": False,
+        "awaiting_user_response": False,
+    }
+
+
+def _user_priority_active(voice_state: dict[str, bool]) -> bool:
+    """Return whether user speech should outrank game narration right now."""
+    return (
+        voice_state["ptt_active"]
+        or voice_state["buffering_user_audio"]
+        or voice_state["awaiting_user_response"]
+    )
+
+
+def _assistant_audio_suppressed(voice_state: dict[str, bool]) -> bool:
+    """Return whether local assistant playback should be muted for user speech."""
+    return voice_state["ptt_active"] or voice_state["buffering_user_audio"]
+
+
+async def _flush_user_audio_turn(
+    client: XaiRealtimeClient,
+    *,
+    voice_state: dict[str, bool],
+    chunks: list[bytes],
+) -> None:
+    """Send one push-to-talk mic burst as a single user turn."""
+    if not chunks:
+        return
+
+    voice_state["buffering_user_audio"] = True
+    total_bytes = sum(len(chunk) for chunk in chunks)
+    try:
+        await client.wait_until_idle()
+        voice_state["awaiting_user_response"] = True
+        for chunk in chunks:
+            await client.append_input_audio(chunk)
+        await client.commit_input_audio()
+        logger.info(
+            "realtime user speech committed chunks=%s bytes=%s",
+            len(chunks),
+            total_bytes,
+        )
+    except Exception:
+        voice_state["awaiting_user_response"] = False
+        raise
+    finally:
+        voice_state["buffering_user_audio"] = False
+
+
+async def _realtime_user_input_worker(
+    client: XaiRealtimeClient,
+    *,
+    runtime: SessionRuntime,
+    voice_state: dict[str, bool],
+) -> None:
+    """Capture user mic audio behind push-to-talk and forward it to realtime."""
+    if not runtime.settings.realtime_enable_user_speech:
+        logger.info("realtime user speech disabled")
+        return
+
+    from sg_coach.realtime.user_voice import PushToTalkController, RealtimeMicrophoneInput
+
+    loop = asyncio.get_running_loop()
+    ptt_queue: asyncio.Queue[bool | None] = asyncio.Queue()
+    mic_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+    push_to_talk = PushToTalkController(
+        key_spec=runtime.settings.realtime_push_to_talk_key,
+        loop=loop,
+        state_queue=ptt_queue,
+    )
+    microphone = RealtimeMicrophoneInput(
+        sample_rate=runtime.settings.realtime_input_sample_rate,
+        device=runtime.settings.realtime_input_audio_device,
+        loop=loop,
+        audio_queue=mic_queue,
+    )
+
+    current_turn_chunks: list[bytes] = []
+    pending_flush_task: asyncio.Task[None] | None = None
+
+    try:
+        push_to_talk.start()
+        microphone.start()
+    except Exception:
+        logger.exception("failed to start realtime user speech input")
+        await push_to_talk.stop()
+        await microphone.stop()
+        return
+
+    logger.info(
+        "realtime user speech ready push_to_talk_key=%s input_sample_rate=%s",
+        runtime.settings.realtime_push_to_talk_key,
+        runtime.settings.realtime_input_sample_rate,
+    )
+
+    try:
+        while True:
+            pending_tasks = {
+                asyncio.create_task(ptt_queue.get()): "ptt",
+                asyncio.create_task(mic_queue.get()): "mic",
+            }
+            done, pending = await asyncio.wait(
+                pending_tasks.keys(),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+
+            for task in done:
+                source = pending_tasks[task]
+                item = task.result()
+
+                if source == "ptt":
+                    if item is None:
+                        return
+
+                    is_pressed = bool(item)
+                    if is_pressed:
+                        voice_state["ptt_active"] = True
+                        current_turn_chunks = []
+                        microphone.set_capture_enabled(True)
+                        logger.info(
+                            "push-to-talk pressed key=%s",
+                            runtime.settings.realtime_push_to_talk_key,
+                        )
+                        continue
+
+                    microphone.set_capture_enabled(False)
+                    voice_state["ptt_active"] = False
+                    logger.info(
+                        "push-to-talk released key=%s captured_chunks=%s",
+                        runtime.settings.realtime_push_to_talk_key,
+                        len(current_turn_chunks),
+                    )
+
+                    if not current_turn_chunks:
+                        continue
+
+                    if pending_flush_task is not None and not pending_flush_task.done():
+                        logger.info(
+                            "user speech turn dropped reason=previous_turn_still_pending chunks=%s",
+                            len(current_turn_chunks),
+                        )
+                        current_turn_chunks = []
+                        continue
+
+                    flush_chunks = list(current_turn_chunks)
+                    current_turn_chunks = []
+                    pending_flush_task = asyncio.create_task(
+                        _flush_user_audio_turn(
+                            client,
+                            voice_state=voice_state,
+                            chunks=flush_chunks,
+                        )
+                    )
+                else:
+                    if item is None:
+                        return
+                    if voice_state["ptt_active"]:
+                        current_turn_chunks.append(item)
+    finally:
+        if pending_flush_task is not None:
+            pending_flush_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pending_flush_task
+        await push_to_talk.stop()
+        await microphone.stop()
+
+
 def _drain_pending_speech_items(
     speech_queue: asyncio.Queue[SpeechCue | str],
 ) -> tuple[int, bool]:
@@ -110,6 +283,7 @@ async def realtime_bridge_worker(
         instructions=build_realtime_instructions(runtime),
         voice=runtime.settings.realtime_voice,
         language=runtime.settings.realtime_language,
+        input_sample_rate=runtime.settings.realtime_input_sample_rate,
         output_sample_rate=runtime.settings.realtime_output_sample_rate,
     )
 
@@ -122,9 +296,17 @@ async def realtime_bridge_worker(
 
     output_dir = runtime.settings.debug_realtime_dir / runtime.session_id
     output_dir.mkdir(parents=True, exist_ok=True)
+    voice_state = _build_voice_state()
+    pending_commentary: CommentaryResult | None = None
     raw_sink_task = asyncio.create_task(_realtime_raw_event_sink(client, output_dir=output_dir))
     text_sink_task = asyncio.create_task(_realtime_text_sink(client, output_dir=output_dir))
-    audio_sink_task = asyncio.create_task(_realtime_audio_sink(client, runtime=runtime))
+    transcript_sink_task = asyncio.create_task(_realtime_user_transcript_sink(client, output_dir=output_dir))
+    audio_sink_task = asyncio.create_task(
+        _realtime_audio_sink(client, runtime=runtime, voice_state=voice_state)
+    )
+    user_input_task = asyncio.create_task(
+        _realtime_user_input_worker(client, runtime=runtime, voice_state=voice_state)
+    )
 
     primer = runtime.memory_summary()
     if primer:
@@ -137,6 +319,7 @@ async def realtime_bridge_worker(
                 pending_tasks[asyncio.create_task(commentary_queue.get())] = "commentary"
             if speech_open:
                 pending_tasks[asyncio.create_task(speech_queue.get())] = "speech"
+            pending_tasks[asyncio.create_task(client.response_event_queue.get())] = "response"
 
             done, pending = await asyncio.wait(
                 pending_tasks.keys(),
@@ -148,18 +331,69 @@ async def realtime_bridge_worker(
             commentary_sent_this_round = False
             ordered_done = sorted(
                 done,
-                key=lambda current: 0 if pending_tasks[current] == "commentary" else 1,
+                key=lambda current: (
+                    0
+                    if pending_tasks[current] == "response"
+                    else 1 if pending_tasks[current] == "commentary" else 2
+                ),
             )
 
             for task in ordered_done:
                 source = pending_tasks[task]
                 item = task.result()
 
+                if source == "response":
+                    if item is None:
+                        continue
+
+                    logger.info(
+                        "realtime response event response_id=%s source=%s phase=%s",
+                        item.response_id,
+                        item.source,
+                        item.phase,
+                    )
+
+                    if item.phase == "created" and item.source == "user_speech":
+                        voice_state["awaiting_user_response"] = True
+                        continue
+
+                    if item.phase == "done":
+                        if item.source == "user_speech":
+                            voice_state["awaiting_user_response"] = False
+                        if pending_commentary is not None and not _user_priority_active(voice_state):
+                            commentary_item = pending_commentary
+                            pending_commentary = None
+                            await client.send_event_text(build_realtime_text_from_commentary(commentary_item))
+                            logger.info(
+                                "realtime bridge sent deferred commentary request_id=%s",
+                                commentary_item.request_id,
+                            )
+                    continue
+
                 if source == "commentary":
                     if item == COMMENTARY_STREAM_COMPLETE:
                         commentary_open = False
                         continue
                     if runtime.settings.realtime_emit_commentary:
+                        if _user_priority_active(voice_state):
+                            replaced_request_id = pending_commentary.request_id if pending_commentary else None
+                            pending_commentary = item
+                            logger.info(
+                                "realtime bridge deferred commentary request_id=%s reason=user_priority replaced_request_id=%s",
+                                item.request_id,
+                                replaced_request_id,
+                            )
+                            continue
+                        if client.is_response_active():
+                            replaced_request_id = pending_commentary.request_id if pending_commentary else None
+                            pending_commentary = item
+                            logger.info(
+                                "realtime bridge deferred commentary request_id=%s reason=response_active source=%s replaced_request_id=%s",
+                                item.request_id,
+                                client.current_response_source,
+                                replaced_request_id,
+                            )
+                            continue
                         dropped_count = 0
                         if runtime.settings.realtime_drop_speech_cues_on_commentary:
                             dropped_count, stream_complete_seen = _drain_pending_speech_items(speech_queue)
@@ -182,6 +416,25 @@ async def realtime_bridge_worker(
                         speech_open = False
                         continue
                     if runtime.settings.realtime_emit_speech_cues:
+                        if _user_priority_active(voice_state):
+                            logger.info(
+                                "realtime bridge dropped speech cue cue_id=%s reason=user_priority",
+                                item.cue_id,
+                            )
+                            continue
+                        if pending_commentary is not None:
+                            logger.info(
+                                "realtime bridge dropped speech cue cue_id=%s reason=commentary_deferred",
+                                item.cue_id,
+                            )
+                            continue
+                        if client.is_response_active():
+                            logger.info(
+                                "realtime bridge dropped speech cue cue_id=%s reason=response_active source=%s",
+                                item.cue_id,
+                                client.current_response_source,
+                            )
+                            continue
                         if commentary_sent_this_round:
                             logger.info(
                                 "realtime bridge dropped speech cue cue_id=%s reason=commentary_same_round",
@@ -203,7 +456,9 @@ async def realtime_bridge_worker(
         await client.close()
         await raw_sink_task
         await text_sink_task
+        await transcript_sink_task
         await audio_sink_task
+        await user_input_task
         logger.info("realtime bridge complete")
 
 
@@ -240,10 +495,29 @@ async def _realtime_text_sink(
         turn_index += 1
 
 
+async def _realtime_user_transcript_sink(
+    client: XaiRealtimeClient,
+    *,
+    output_dir: Path,
+) -> None:
+    """Persist finalized user speech transcripts from the realtime session."""
+    turn_index = 0
+    while True:
+        transcript = await client.user_transcript_queue.get()
+        if transcript is None:
+            return
+
+        output_path = output_dir / f"user_{turn_index:03d}.txt"
+        output_path.write_text(transcript, encoding="utf-8")
+        logger.info("realtime user turn=%s text=%s output=%s", turn_index, transcript, output_path)
+        turn_index += 1
+
+
 async def _realtime_audio_sink(
     client: XaiRealtimeClient,
     *,
     runtime: SessionRuntime,
+    voice_state: dict[str, bool],
 ) -> None:
     """Play assistant audio chunks locally so latency is audible."""
     if not runtime.settings.realtime_play_audio:
@@ -253,18 +527,15 @@ async def _realtime_audio_sink(
 
     try:
         import sounddevice as sd
+        from sg_coach.realtime.user_voice import normalize_audio_device
     except ImportError:
-        logger.warning("sounddevice is not installed; realtime audio will be drained but not played")
+        logger.warning(
+            "sounddevice or realtime user voice helpers are not installed; audio will be drained but not played"
+        )
         await _drain_audio_queue(client)
         return
 
-    device_setting = runtime.settings.realtime_audio_device
-    if device_setting is not None:
-        device_setting = device_setting.strip()
-        if not device_setting:
-            device_setting = None
-        elif device_setting.isdigit():
-            device_setting = int(device_setting)
+    device_setting = normalize_audio_device(runtime.settings.realtime_audio_device)
 
     try:
         stream = sd.RawOutputStream(
@@ -295,6 +566,8 @@ async def _realtime_audio_sink(
             if chunk is None:
                 return
             if not chunk:
+                continue
+            if _assistant_audio_suppressed(voice_state):
                 continue
             await asyncio.to_thread(stream.write, chunk)
     finally:

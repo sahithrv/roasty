@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import json
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -11,6 +12,15 @@ try:
     import websockets
 except ImportError:  # pragma: no cover - depends on local env
     websockets = None  # type: ignore[assignment]
+
+
+@dataclass(slots=True)
+class RealtimeResponseEvent:
+    """Lifecycle event for one realtime assistant response turn."""
+
+    response_id: str
+    source: str
+    phase: str
 
 
 @dataclass(slots=True)
@@ -22,6 +32,7 @@ class XaiRealtimeClient:
     instructions: str
     voice: str = "Leo"
     language: str = "en"
+    input_sample_rate: int = 24000
     output_sample_rate: int = 24000
     raw_event_queue: asyncio.Queue[dict[str, Any] | None] = field(
         default_factory=asyncio.Queue,
@@ -38,10 +49,25 @@ class XaiRealtimeClient:
         init=False,
         repr=False,
     )
+    user_transcript_queue: asyncio.Queue[str | None] = field(
+        default_factory=asyncio.Queue,
+        init=False,
+        repr=False,
+    )
+    response_event_queue: asyncio.Queue[RealtimeResponseEvent | None] = field(
+        default_factory=asyncio.Queue,
+        init=False,
+        repr=False,
+    )
     _ws: Any = field(default=None, init=False, repr=False)
     _receive_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _response_parts: dict[str, list[str]] = field(default_factory=dict, init=False, repr=False)
+    _response_sources: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _pending_response_sources: deque[str] = field(default_factory=deque, init=False, repr=False)
     _emitted_response_keys: set[str] = field(default_factory=set, init=False, repr=False)
+    _session_ready: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
+    _idle_event: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
+    _current_response_source: str | None = field(default=None, init=False, repr=False)
     _send_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     async def connect(self) -> None:
@@ -49,6 +75,7 @@ class XaiRealtimeClient:
         if websockets is None:
             raise RuntimeError("Realtime bridge requires the 'websockets' package to be installed.")
 
+        self._idle_event.set()
         self._ws = await websockets.connect(
             self.ws_url,
             additional_headers={"Authorization": f"Bearer {self.api_key.strip()}"},
@@ -61,7 +88,14 @@ class XaiRealtimeClient:
                     "instructions": self.instructions,
                     "voice": self.voice.lower(),
                     "language": self.language,
+                    "turn_detection": None,
                     "audio": {
+                        "input": {
+                            "format": {
+                                "type": "audio/pcm",
+                                "rate": self.input_sample_rate,
+                            }
+                        },
                         "output": {
                             "format": {
                                 "type": "audio/pcm",
@@ -73,6 +107,9 @@ class XaiRealtimeClient:
             }
         )
         self._receive_task = asyncio.create_task(self._receive_loop())
+        session_ready = await asyncio.wait_for(self._session_ready.wait(), timeout=15)
+        if not session_ready:
+            raise RuntimeError("Timed out waiting for realtime session.updated.")
 
     async def close(self) -> None:
         """Close the socket and stop the receive tasks cleanly."""
@@ -87,6 +124,8 @@ class XaiRealtimeClient:
         await self.raw_event_queue.put(None)
         await self.text_queue.put(None)
         await self.audio_queue.put(None)
+        await self.user_transcript_queue.put(None)
+        await self.response_event_queue.put(None)
 
     async def send_event_text(self, text: str) -> None:
         """Inject a game-event text message and ask the voice agent to respond."""
@@ -100,7 +139,7 @@ class XaiRealtimeClient:
                 },
             }
         )
-        await self._send_json({"type": "response.create"})
+        await self._request_response(source="system_event")
 
     async def send_memory_text(self, text: str) -> None:
         """Inject silent memory/context into the session without forcing a reply."""
@@ -115,11 +154,48 @@ class XaiRealtimeClient:
             }
         )
 
+    async def append_input_audio(self, audio_bytes: bytes) -> None:
+        """Append one PCM16 mono chunk to the realtime input audio buffer."""
+        if not audio_bytes:
+            return
+        await self._send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(audio_bytes).decode("ascii"),
+            }
+        )
+
+    async def clear_input_audio(self) -> None:
+        """Clear any buffered user audio that has not been committed yet."""
+        await self._send_json({"type": "input_audio_buffer.clear"})
+
+    async def commit_input_audio(self) -> None:
+        """Commit buffered user audio and request one assistant response."""
+        await self._send_json({"type": "input_audio_buffer.commit"})
+        await self._request_response(source="user_speech")
+
+    async def wait_until_idle(self) -> None:
+        """Wait until no assistant response turn is currently in progress."""
+        await self._idle_event.wait()
+
+    def is_response_active(self) -> bool:
+        """Return whether the assistant is currently producing a response."""
+        return not self._idle_event.is_set()
+
+    @property
+    def current_response_source(self) -> str | None:
+        """Return the local source label for the in-flight assistant response, if any."""
+        return self._current_response_source
+
     async def _send_json(self, payload: dict[str, Any]) -> None:
         if self._ws is None:
             raise RuntimeError("Realtime client is not connected.")
         async with self._send_lock:
             await self._ws.send(json.dumps(payload))
+
+    async def _request_response(self, *, source: str) -> None:
+        self._pending_response_sources.append(source)
+        await self._send_json({"type": "response.create"})
 
     async def _receive_loop(self) -> None:
         assert self._ws is not None
@@ -132,13 +208,27 @@ class XaiRealtimeClient:
         except asyncio.CancelledError:
             raise
         finally:
+            self._session_ready.set()
+            self._idle_event.set()
             await self.raw_event_queue.put(None)
             await self.text_queue.put(None)
             await self.audio_queue.put(None)
+            await self.user_transcript_queue.put(None)
+            await self.response_event_queue.put(None)
 
     async def _maybe_emit_text(self, event: dict[str, Any]) -> None:
         event_type = event.get("type", "")
         response_key = self._response_key(event)
+
+        if event_type == "session.updated":
+            self._session_ready.set()
+            return
+
+        if event_type == "conversation.item.input_audio_transcription.completed":
+            transcript = str(event.get("transcript", "")).strip()
+            if transcript:
+                await self.user_transcript_queue.put(transcript)
+            return
 
         if event_type in {"response.text.delta", "response.output_audio_transcript.delta"}:
             delta = str(event.get("delta", ""))
@@ -162,9 +252,25 @@ class XaiRealtimeClient:
             await self._emit_text_once(response_key, transcript)
             return
 
+        if event_type == "response.created":
+            source = self._pending_response_sources.popleft() if self._pending_response_sources else "unknown"
+            self._response_sources[response_key] = source
+            self._current_response_source = source
+            self._idle_event.clear()
+            await self.response_event_queue.put(
+                RealtimeResponseEvent(response_id=response_key, source=source, phase="created")
+            )
+            return
+
         if event_type == "response.done":
             text = self._extract_text_from_response_done(event, response_key)
             await self._emit_text_once(response_key, text)
+            source = self._response_sources.pop(response_key, "unknown")
+            self._current_response_source = None
+            self._idle_event.set()
+            await self.response_event_queue.put(
+                RealtimeResponseEvent(response_id=response_key, source=source, phase="done")
+            )
 
     async def _emit_text_once(self, response_key: str, text: str) -> None:
         """Queue one final assistant turn per response id.
