@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from pathlib import Path
 
@@ -63,6 +64,26 @@ def build_realtime_text_from_speech_cue(cue: SpeechCue) -> str:
     return f"GAME_EVENT: ambient scene update. {cue.text}"
 
 
+def _drain_pending_speech_items(
+    speech_queue: asyncio.Queue[SpeechCue | str],
+) -> tuple[int, bool]:
+    """Drop queued low-priority speech cues when a higher-priority event arrives."""
+    dropped = 0
+    stream_complete_seen = False
+
+    while True:
+        try:
+            item = speech_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return dropped, stream_complete_seen
+
+        if item == SPEECH_STREAM_COMPLETE:
+            stream_complete_seen = True
+            continue
+
+        dropped += 1
+
+
 async def realtime_bridge_worker(
     runtime: SessionRuntime,
     *,
@@ -89,6 +110,7 @@ async def realtime_bridge_worker(
         instructions=build_realtime_instructions(runtime),
         voice=runtime.settings.realtime_voice,
         language=runtime.settings.realtime_language,
+        output_sample_rate=runtime.settings.realtime_output_sample_rate,
     )
 
     try:
@@ -102,6 +124,7 @@ async def realtime_bridge_worker(
     output_dir.mkdir(parents=True, exist_ok=True)
     raw_sink_task = asyncio.create_task(_realtime_raw_event_sink(client, output_dir=output_dir))
     text_sink_task = asyncio.create_task(_realtime_text_sink(client, output_dir=output_dir))
+    audio_sink_task = asyncio.create_task(_realtime_audio_sink(client, runtime=runtime))
 
     primer = runtime.memory_summary()
     if primer:
@@ -122,7 +145,13 @@ async def realtime_bridge_worker(
             for task in pending:
                 task.cancel()
 
-            for task in done:
+            commentary_sent_this_round = False
+            ordered_done = sorted(
+                done,
+                key=lambda current: 0 if pending_tasks[current] == "commentary" else 1,
+            )
+
+            for task in ordered_done:
                 source = pending_tasks[task]
                 item = task.result()
 
@@ -131,16 +160,40 @@ async def realtime_bridge_worker(
                         commentary_open = False
                         continue
                     if runtime.settings.realtime_emit_commentary:
+                        dropped_count = 0
+                        if runtime.settings.realtime_drop_speech_cues_on_commentary:
+                            dropped_count, stream_complete_seen = _drain_pending_speech_items(speech_queue)
+                            if stream_complete_seen:
+                                speech_open = False
+                            if dropped_count:
+                                logger.info(
+                                    "realtime bridge dropped queued speech cues count=%s reason=commentary_priority",
+                                    dropped_count,
+                                )
                         await client.send_event_text(build_realtime_text_from_commentary(item))
+                        commentary_sent_this_round = True
                         logger.info(
-                            "realtime bridge sent commentary request_id=%s",
+                            "realtime bridge sent commentary request_id=%s dropped_speech_cues=%s",
                             item.request_id,
+                            dropped_count,
                         )
                 else:
                     if item == SPEECH_STREAM_COMPLETE:
                         speech_open = False
                         continue
                     if runtime.settings.realtime_emit_speech_cues:
+                        if commentary_sent_this_round:
+                            logger.info(
+                                "realtime bridge dropped speech cue cue_id=%s reason=commentary_same_round",
+                                item.cue_id,
+                            )
+                            continue
+                        if runtime.settings.realtime_drop_speech_cues_on_commentary and commentary_open and not commentary_queue.empty():
+                            logger.info(
+                                "realtime bridge dropped speech cue cue_id=%s reason=commentary_pending",
+                                item.cue_id,
+                            )
+                            continue
                         await client.send_event_text(build_realtime_text_from_speech_cue(item))
                         logger.info(
                             "realtime bridge sent speech cue cue_id=%s",
@@ -150,6 +203,7 @@ async def realtime_bridge_worker(
         await client.close()
         await raw_sink_task
         await text_sink_task
+        await audio_sink_task
         logger.info("realtime bridge complete")
 
 
@@ -184,6 +238,78 @@ async def _realtime_text_sink(
         output_path.write_text(text, encoding="utf-8")
         logger.info("realtime assistant turn=%s text=%s output=%s", turn_index, text, output_path)
         turn_index += 1
+
+
+async def _realtime_audio_sink(
+    client: XaiRealtimeClient,
+    *,
+    runtime: SessionRuntime,
+) -> None:
+    """Play assistant audio chunks locally so latency is audible."""
+    if not runtime.settings.realtime_play_audio:
+        logger.info("realtime audio playback disabled")
+        await _drain_audio_queue(client)
+        return
+
+    try:
+        import sounddevice as sd
+    except ImportError:
+        logger.warning("sounddevice is not installed; realtime audio will be drained but not played")
+        await _drain_audio_queue(client)
+        return
+
+    device_setting = runtime.settings.realtime_audio_device
+    if device_setting is not None:
+        device_setting = device_setting.strip()
+        if not device_setting:
+            device_setting = None
+        elif device_setting.isdigit():
+            device_setting = int(device_setting)
+
+    try:
+        stream = sd.RawOutputStream(
+            samplerate=runtime.settings.realtime_output_sample_rate,
+            channels=1,
+            dtype="int16",
+            device=device_setting,
+        )
+        stream.start()
+    except Exception:
+        logger.exception(
+            "failed to open realtime audio output device=%s sample_rate=%s",
+            device_setting if device_setting is not None else "default",
+            runtime.settings.realtime_output_sample_rate,
+        )
+        await _drain_audio_queue(client)
+        return
+
+    logger.info(
+        "realtime audio playback started sample_rate=%s device=%s",
+        runtime.settings.realtime_output_sample_rate,
+        device_setting if device_setting is not None else "default",
+    )
+
+    try:
+        while True:
+            chunk = await client.audio_queue.get()
+            if chunk is None:
+                return
+            if not chunk:
+                continue
+            await asyncio.to_thread(stream.write, chunk)
+    finally:
+        with contextlib.suppress(Exception):
+            stream.stop()
+        with contextlib.suppress(Exception):
+            stream.close()
+
+
+async def _drain_audio_queue(client: XaiRealtimeClient) -> None:
+    """Drain audio events when playback is disabled/unavailable."""
+    while True:
+        chunk = await client.audio_queue.get()
+        if chunk is None:
+            return
 
 
 async def _drain_bridge_queues(

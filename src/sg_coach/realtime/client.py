@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 from dataclasses import dataclass, field
@@ -21,12 +22,18 @@ class XaiRealtimeClient:
     instructions: str
     voice: str = "Leo"
     language: str = "en"
+    output_sample_rate: int = 24000
     raw_event_queue: asyncio.Queue[dict[str, Any] | None] = field(
         default_factory=asyncio.Queue,
         init=False,
         repr=False,
     )
     text_queue: asyncio.Queue[str | None] = field(
+        default_factory=asyncio.Queue,
+        init=False,
+        repr=False,
+    )
+    audio_queue: asyncio.Queue[bytes | None] = field(
         default_factory=asyncio.Queue,
         init=False,
         repr=False,
@@ -54,6 +61,14 @@ class XaiRealtimeClient:
                     "instructions": self.instructions,
                     "voice": self.voice.lower(),
                     "language": self.language,
+                    "audio": {
+                        "output": {
+                            "format": {
+                                "type": "audio/pcm",
+                                "rate": self.output_sample_rate,
+                            }
+                        }
+                    },
                 },
             }
         )
@@ -71,6 +86,7 @@ class XaiRealtimeClient:
 
         await self.raw_event_queue.put(None)
         await self.text_queue.put(None)
+        await self.audio_queue.put(None)
 
     async def send_event_text(self, text: str) -> None:
         """Inject a game-event text message and ask the voice agent to respond."""
@@ -118,6 +134,7 @@ class XaiRealtimeClient:
         finally:
             await self.raw_event_queue.put(None)
             await self.text_queue.put(None)
+            await self.audio_queue.put(None)
 
     async def _maybe_emit_text(self, event: dict[str, Any]) -> None:
         event_type = event.get("type", "")
@@ -127,6 +144,12 @@ class XaiRealtimeClient:
             delta = str(event.get("delta", ""))
             if delta:
                 self._response_parts.setdefault(response_key, []).append(delta)
+            return
+
+        if event_type == "response.output_audio.delta":
+            delta_b64 = str(event.get("delta", ""))
+            if delta_b64:
+                await self.audio_queue.put(base64.b64decode(delta_b64))
             return
 
         if event_type == "response.text.done":

@@ -26,3 +26,5 @@ venv/
 # data debug
 data/debug_commentary
 data/debug_frames
+data/debug_speech
+data/debug_realtime

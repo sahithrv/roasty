@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     gta_chaos_score_threshold: float = Field(default=0.09, ge=0.0, le=1.0)
     gta_chaos_confirm_frames: int = Field(default=2, ge=1, le=5)
     gta_chaos_cooldown_seconds: int = Field(default=8, ge=1, le=60)
+    gta_chaos_startup_delay_seconds: int = Field(default=12, ge=0, le=120)
     commentary_context_frame_count: int = Field(default=5, ge=1, le=12)
     commentary_recent_event_limit: int = Field(default=5, ge=1, le=12)
 
@@ -63,8 +64,13 @@ class Settings(BaseSettings):
     realtime_personality: str = "sarcastic_coach"
     realtime_voice: str = "leo"
     realtime_language: str = "en"
+    realtime_play_audio: bool = True
+    realtime_output_sample_rate: int = Field(default=24000, ge=8000, le=48000)
+    realtime_audio_device: str | None = None
     realtime_emit_commentary: bool = True
     realtime_emit_speech_cues: bool = True
+    realtime_speech_cue_min_interval_seconds: int = Field(default=180, ge=0, le=3600)
+    realtime_drop_speech_cues_on_commentary: bool = True
 
     @property
     def sessions_dir(self) -> Path:

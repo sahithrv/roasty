@@ -54,6 +54,9 @@ async def speech_cue_worker(
     event_queue: asyncio.Queue[GameEvent | str],
 ) -> None:
     """Turn cheap ambient events into text cues for a future realtime layer."""
+    last_emitted_at_by_type: dict[str, float] = {}
+    loop = asyncio.get_running_loop()
+
     while True:
         item = await event_queue.get()
         if item == EVENT_STREAM_COMPLETE:
@@ -66,6 +69,21 @@ async def speech_cue_worker(
         if cue is None:
             continue
 
+        cue_key = f"{cue.cue_type}:{event.event_type}"
+        min_interval = runtime.settings.realtime_speech_cue_min_interval_seconds
+        now = loop.time()
+        last_emitted_at = last_emitted_at_by_type.get(cue_key)
+        if min_interval > 0 and last_emitted_at is not None and (now - last_emitted_at) < min_interval:
+            remaining = max(0.0, min_interval - (now - last_emitted_at))
+            logger.info(
+                "speech cue dropped event_type=%s cue_type=%s reason=throttled retry_in=%.1fs",
+                event.event_type,
+                cue.cue_type,
+                remaining,
+            )
+            continue
+
+        last_emitted_at_by_type[cue_key] = now
         await runtime.publish(SPEECH_PLAY, cue)
         logger.info(
             "speech cue built event_type=%s cue_type=%s text=%s",

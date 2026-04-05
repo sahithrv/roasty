@@ -31,11 +31,28 @@ class GtaChaosDetector:
     _previous_gray: np.ndarray | None = field(default=None, init=False, repr=False)
     _consecutive_hits: int = field(default=0, init=False, repr=False)
     _cooldown_until: datetime | None = field(default=None, init=False, repr=False)
+    _startup_ignore_until: datetime | None = field(default=None, init=False, repr=False)
     _best_score_seen: float = field(default=0.0, init=False, repr=False)
 
     async def detect(self, frame: FramePacket) -> list[DetectionSignal]:
         """Emit a sparse `chaos_spike` signal when the scene looks unusually wild."""
         if frame.image_bgr is None:
+            return []
+
+        if self._startup_ignore_until is None:
+            self._startup_ignore_until = frame.timestamp + timedelta(
+                seconds=self.settings.gta_chaos_startup_delay_seconds
+            )
+            if self.settings.gta_chaos_startup_delay_seconds > 0:
+                logger.info(
+                    "chaos detector startup warmup started frame_id=%s delay_seconds=%s active_at=%s",
+                    frame.frame_id,
+                    self.settings.gta_chaos_startup_delay_seconds,
+                    self._startup_ignore_until.isoformat(),
+                )
+
+        if self._startup_ignore_until is not None and frame.timestamp < self._startup_ignore_until:
+            self._previous_gray = self._prepare_gray(frame.image_bgr)
             return []
 
         if self._cooldown_until is not None and frame.timestamp < self._cooldown_until:
@@ -91,6 +108,7 @@ class GtaChaosDetector:
                     "edge_density": round(metrics["edge_density"], 4),
                     "confirm_frames": self.settings.gta_chaos_confirm_frames,
                     "cooldown_seconds": self.settings.gta_chaos_cooldown_seconds,
+                    "startup_delay_seconds": self.settings.gta_chaos_startup_delay_seconds,
                 },
                 frame_ref=frame.frame_id,
                 dedupe_key=f"chaos:{int(frame.timestamp.timestamp()) // self.settings.gta_chaos_cooldown_seconds}",
