@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from pathlib import Path
 
-from sg_coach.capture.replay_buffer import ReplayFrameBuffer
+import cv2
+
+from sg_coach.capture.replay_buffer import ReplayFrame, ReplayFrameBuffer
 from sg_coach.grok.client import GrokChatClient
-from sg_coach.grok.payloads import build_grok_chat_payload
+from sg_coach.grok.payloads import (
+    build_grok_chat_payload,
+    parse_structured_commentary_output,
+    sanitize_grok_chat_payload_for_debug,
+)
 from sg_coach.memory.store import MemorySnapshot
 from sg_coach.orchestrator.session import SessionRuntime
 from sg_coach.orchestrator.topics import COMMENTARY_READY, COMMENTARY_REQUEST
@@ -18,30 +25,57 @@ from sg_coach.shared.streaming import COMMENTARY_STREAM_COMPLETE, EVENT_STREAM_C
 logger = get_logger(__name__)
 
 
-def select_context_frame_paths(frame_paths: list[str], *, max_frames: int) -> list[str]:
+def select_context_frames(frames: list[ReplayFrame], *, max_frames: int) -> list[ReplayFrame]:
     """Pick a small, evenly spaced subset of replay frames.
 
-    The replay buffer may export a lot of frames, but sending every one of them
-    to a multimodal model is unnecessary and expensive. This helper keeps the
-    first milestone simple: select a few evenly spaced frames that describe the
-    lead-up to the event.
+    The replay buffer may contain many frames, but the model only needs a few
+    to understand the lead-up. This helper keeps the oldest/newest spread while
+    staying cheap.
     """
-    if max_frames <= 0 or not frame_paths:
+    if max_frames <= 0 or not frames:
         return []
-    if len(frame_paths) <= max_frames:
-        return frame_paths
+    if len(frames) <= max_frames:
+        return frames
     if max_frames == 1:
-        return [frame_paths[-1]]
+        return [frames[-1]]
 
     indices = []
-    last_index = len(frame_paths) - 1
+    last_index = len(frames) - 1
     for slot in range(max_frames):
         index = round(slot * last_index / (max_frames - 1))
         indices.append(index)
 
     # Remove any duplicates from rounding while preserving order.
     selected_indices = list(dict.fromkeys(indices))
-    return [frame_paths[index] for index in selected_indices]
+    return [frames[index] for index in selected_indices]
+
+
+def replay_frame_to_data_url(replay_frame: ReplayFrame) -> str:
+    """Encode one replay frame directly into a JPEG data URL for Grok."""
+    ok, encoded = cv2.imencode(".jpg", replay_frame.image_bgr)
+    if not ok:
+        raise RuntimeError(f"Failed to encode replay frame {replay_frame.frame_id} as JPEG")
+    payload = base64.b64encode(encoded.tobytes()).decode("ascii")
+    return f"data:image/jpeg;base64,{payload}"
+
+
+def save_commentary_preview_frame(
+    *,
+    replay_frame: ReplayFrame | None,
+    output_root: Path,
+    session_id: str,
+    request_id: str,
+) -> str | None:
+    """Persist only the main trigger frame for local inspection."""
+    if replay_frame is None:
+        return None
+
+    output_dir = output_root / session_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{request_id}_frame.jpg"
+    if cv2.imwrite(str(output_path), replay_frame.image_bgr):
+        return str(output_path)
+    return None
 
 
 def build_commentary_snapshot(
@@ -87,14 +121,13 @@ async def commentary_request_worker(
     event_queue: asyncio.Queue[GameEvent | str],
     *,
     replay_buffer: ReplayFrameBuffer,
-    output_root: Path,
 ) -> None:
     """Turn selected game events into model-ready `CommentaryRequest` objects.
 
     End-to-end flow inside this worker:
     1. wait for a final `GameEvent`
     2. ignore event types that are not worth commenting on yet
-    3. export replay-buffer context frames for the interesting event
+    3. select a few replay-buffer context frames for the interesting event
     4. gather the latest session memory snapshot
     5. build a `CommentaryRequest`
     6. publish that request onto the bus for the Grok-facing layer
@@ -110,15 +143,14 @@ async def commentary_request_worker(
         if event.event_type != "wasted":
             continue
 
-        exported_paths = replay_buffer.export_recent_frames(
-            event=event,
-            output_root=output_root,
-            seconds=replay_buffer.buffer_seconds,
-        )
-        selected_paths = select_context_frame_paths(
-            exported_paths,
+        replay_frames = replay_buffer.recent_frames(seconds=replay_buffer.buffer_seconds)
+        selected_frames = select_context_frames(
+            replay_frames,
             max_frames=runtime.settings.commentary_context_frame_count,
         )
+        selected_frame_data_urls = [
+            replay_frame_to_data_url(replay_frame) for replay_frame in selected_frames
+        ]
 
         # Yield once so the memory worker can usually commit the same event
         # before we read session state. The snapshot helper below still handles
@@ -130,35 +162,45 @@ async def commentary_request_worker(
             recent_limit=runtime.settings.commentary_recent_event_limit,
         )
 
-        enriched_metadata = {
-            **event.metadata,
-            "context_frame_paths": selected_paths,
-            "replay_export_frame_count": len(exported_paths),
-            "replay_buffer_seconds": replay_buffer.buffer_seconds,
-        }
-        enriched_event = event.model_copy(
-            update={
-                "metadata": enriched_metadata,
-                "frame_path": selected_paths[-1] if selected_paths else event.frame_path,
-            }
-        )
-
         request = CommentaryRequest(
             persona=runtime.settings.default_persona,
-            latest_event=enriched_event,
+            latest_event=event,
             recent_events=snapshot.recent_events,
             counters=snapshot.counters,
             callback_candidates=snapshot.callback_candidates,
             memory_summary=snapshot.summary_text,
-            include_frame=bool(selected_paths),
-            frame_path=selected_paths[-1] if selected_paths else None,
-            context_frame_paths=selected_paths,
+            include_frame=bool(selected_frames),
+            context_frame_data_urls=selected_frame_data_urls,
+        )
+        preview_frame_path = save_commentary_preview_frame(
+            replay_frame=selected_frames[-1] if selected_frames else None,
+            output_root=runtime.settings.debug_commentary_dir,
+            session_id=runtime.session_id,
+            request_id=request.request_id,
+        )
+        enriched_metadata = {
+            **event.metadata,
+            "context_frame_count": len(selected_frames),
+            "replay_buffer_seconds": replay_buffer.buffer_seconds,
+            "preview_frame_path": preview_frame_path,
+        }
+        request = request.model_copy(
+            update={
+                "latest_event": event.model_copy(
+                    update={
+                        "metadata": enriched_metadata,
+                        "frame_path": preview_frame_path or event.frame_path,
+                    }
+                ),
+                "frame_path": preview_frame_path,
+                "context_frame_paths": [preview_frame_path] if preview_frame_path else [],
+            }
         )
         await runtime.publish(COMMENTARY_REQUEST, request)
         logger.info(
             "commentary request built event_type=%s context_frames=%s recent_events=%s callbacks=%s",
             request.latest_event.event_type,
-            len(request.context_frame_paths),
+            len(request.context_frame_data_urls),
             len(request.recent_events),
             len(request.callback_candidates),
         )
@@ -189,7 +231,10 @@ async def commentary_model_worker(
         payload = build_grok_chat_payload(request, model=runtime.settings.grok_model)
         request_dump_path = _write_commentary_debug_payload(
             request=request,
-            payload=payload,
+            payload=sanitize_grok_chat_payload_for_debug(
+                payload,
+                context_frame_paths=request.context_frame_paths,
+            ),
             output_root=runtime.settings.debug_commentary_dir,
             session_id=runtime.session_id,
         )
@@ -220,11 +265,18 @@ async def commentary_model_worker(
             )
             continue
 
+        visual_summary, coach_note = parse_structured_commentary_output(response_text)
+        combined_text = visual_summary
+        if coach_note:
+            combined_text = f"{visual_summary}\nCoach: {coach_note}" if visual_summary else coach_note
+
         result = CommentaryResult(
             request_id=request.request_id,
             event_id=request.latest_event.event_id,
             model=runtime.settings.grok_model,
-            text=response_text,
+            text=combined_text,
+            visual_summary=visual_summary,
+            coach_note=coach_note,
             raw_response=response_json,
         )
         await runtime.publish(COMMENTARY_READY, result)
@@ -256,10 +308,11 @@ async def commentary_result_sink(
             session_id=runtime.session_id,
         )
         logger.info(
-            "commentary result ready request_id=%s model=%s text=%s response_dump=%s text_dump=%s",
+            "commentary result ready request_id=%s model=%s summary=%s coach=%s response_dump=%s text_dump=%s",
             result.request_id,
             result.model,
-            result.text,
+            result.visual_summary,
+            result.coach_note,
             response_dump_path,
             text_dump_path,
         )

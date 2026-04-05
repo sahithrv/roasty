@@ -34,6 +34,8 @@ class GtaWastedDetector:
     _template_edges: np.ndarray | None = field(default=None, init=False, repr=False)
     _consecutive_hits: int = field(default=0, init=False, repr=False)
     _cooldown_until: datetime | None = field(default=None, init=False, repr=False)
+    _waiting_for_banner_clear: bool = field(default=False, init=False, repr=False)
+    _clear_frames_seen: int = field(default=0, init=False, repr=False)
     _warned_missing_template: bool = field(default=False, init=False, repr=False)
     _best_score_seen: float = field(default=0.0, init=False, repr=False)
     _debug_saves_written: int = field(default=0, init=False, repr=False)
@@ -48,7 +50,16 @@ class GtaWastedDetector:
             debug_dir.mkdir(parents=True, exist_ok=True)
 
     async def detect(self, frame: FramePacket) -> list[DetectionSignal]:
-        """Inspect one GTA frame and emit `wasted` when the banner is confirmed."""
+        """Inspect one GTA frame and emit `wasted` when the banner is confirmed.
+
+        Duplicate suppression is intentionally stateful:
+        - a short time cooldown blocks immediate back-to-back emits
+        - after a confirmed hit, the detector also stays disarmed until the
+          banner score drops below a lower "clear" threshold for a few frames
+
+        This prevents a single on-screen death banner from being treated as
+        multiple separate events when it lingers for several seconds.
+        """
         if frame.image_bgr is None:
             return []
         self._frames_seen += 1
@@ -77,6 +88,23 @@ class GtaWastedDetector:
             is_new_best=is_new_best,
         )
 
+        if self._waiting_for_banner_clear:
+            if score <= self.settings.gta_wasted_clear_threshold:
+                self._clear_frames_seen += 1
+            else:
+                self._clear_frames_seen = 0
+
+            if self._clear_frames_seen >= self.settings.gta_wasted_clear_frames:
+                self._waiting_for_banner_clear = False
+                self._clear_frames_seen = 0
+                logger.info(
+                    "wasted detector re-armed after clear score=%.4f clear_frames=%s/%s",
+                    score,
+                    self.settings.gta_wasted_clear_frames,
+                    self.settings.gta_wasted_clear_frames,
+                )
+            return []
+
         if score >= self.settings.gta_wasted_match_threshold:
             self._consecutive_hits += 1
         else:
@@ -87,6 +115,8 @@ class GtaWastedDetector:
             return []
 
         self._consecutive_hits = 0
+        self._waiting_for_banner_clear = True
+        self._clear_frames_seen = 0
         self._cooldown_until = frame.timestamp + timedelta(
             seconds=self.settings.gta_wasted_cooldown_seconds
         )
@@ -104,6 +134,8 @@ class GtaWastedDetector:
                     "template_path": str(self.template_path),
                     "roi_name": self.roi_name,
                     "confirm_frames": self.settings.gta_wasted_confirm_frames,
+                    "clear_threshold": self.settings.gta_wasted_clear_threshold,
+                    "clear_frames": self.settings.gta_wasted_clear_frames,
                 },
                 frame_ref=frame.frame_id,
                 dedupe_key=f"wasted:{frame.frame_id}",
@@ -114,13 +146,13 @@ class GtaWastedDetector:
     def _maybe_log_debug_score(self, frame: FramePacket, score: float) -> None:
         if score > self._best_score_seen:
             self._best_score_seen = score
-        logger.info(
-            "wasted detector new best score=%.4f frame_id=%s threshold=%.4f confirm_hits=%s/%s",
-            score,
-            frame.frame_id,
-            self.settings.gta_wasted_match_threshold,
-            self._consecutive_hits,
-            self.settings.gta_wasted_confirm_frames,
+            logger.info(
+                "wasted detector new best score=%.4f frame_id=%s threshold=%.4f confirm_hits=%s/%s",
+                score,
+                frame.frame_id,
+                self.settings.gta_wasted_match_threshold,
+                self._consecutive_hits,
+                self.settings.gta_wasted_confirm_frames,
             )
 
         if score >= self.settings.gta_wasted_match_threshold:

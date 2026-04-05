@@ -42,6 +42,7 @@ class DemoPassthroughFuser:
             confidence=signal.confidence,
             tags=signal.tags,
             metadata={
+                **signal.metadata,
                 "source_detector": signal.detector_name,
                 "frame_ref": signal.frame_ref,
             },
@@ -50,4 +51,3 @@ class DemoPassthroughFuser:
             cooldown_key=signal.cooldown_key,
         )
         return [event]
-

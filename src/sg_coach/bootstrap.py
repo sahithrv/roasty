@@ -14,6 +14,8 @@ def ensure_runtime_dirs(settings: Settings) -> None:
         settings.debug_frames_dir,
         settings.debug_clips_dir,
         settings.debug_commentary_dir,
+        settings.debug_speech_dir,
+        settings.debug_realtime_dir,
     ):
         Path(path).mkdir(parents=True, exist_ok=True)
 

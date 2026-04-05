@@ -79,6 +79,7 @@ class CommentaryRequest(BaseModel):
     include_frame: bool = False
     frame_path: str | None = None
     context_frame_paths: list[str] = Field(default_factory=list)
+    context_frame_data_urls: list[str] = Field(default_factory=list)
 
 
 class CommentaryResult(BaseModel):
@@ -89,4 +90,18 @@ class CommentaryResult(BaseModel):
     event_id: str
     model: str
     text: str
+    visual_summary: str = ""
+    coach_note: str = ""
     raw_response: dict[str, Any] = Field(default_factory=dict)
+
+
+class SpeechCue(BaseModel):
+    """A lightweight text cue that a speech/realtime layer can react to."""
+
+    cue_id: str = Field(default_factory=lambda: new_id("speech"))
+    timestamp: datetime = Field(default_factory=utc_now)
+    session_id: str
+    source_event_id: str
+    cue_type: str
+    text: str
+    metadata: dict[str, Any] = Field(default_factory=dict)

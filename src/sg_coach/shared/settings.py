@@ -32,12 +32,21 @@ class Settings(BaseSettings):
     gta_wasted_match_threshold: float = Field(default=0.82, ge=0.0, le=1.0)
     gta_wasted_confirm_frames: int = Field(default=2, ge=1, le=5)
     gta_wasted_cooldown_seconds: int = Field(default=5, ge=1, le=30)
+    gta_wasted_clear_threshold: float = Field(default=0.04, ge=0.0, le=1.0)
+    gta_wasted_clear_frames: int = Field(default=3, ge=1, le=10)
     gta_wasted_edge_low_threshold: int = Field(default=80, ge=0, le=255)
     gta_wasted_edge_high_threshold: int = Field(default=180, ge=1, le=255)
-    gta_wasted_debug_enabled: bool = True
+    gta_wasted_debug_enabled: bool = False
     gta_wasted_debug_score_threshold: float = Field(default=0.65, ge=0.0, le=1.0)
     gta_wasted_debug_max_saves: int = Field(default=25, ge=1, le=500)
     gta_wasted_debug_save_first_n: int = Field(default=5, ge=0, le=50)
+    gta_chaos_downscale_width: int = Field(default=320, ge=120, le=960)
+    gta_chaos_motion_threshold: float = Field(default=0.11, ge=0.0, le=1.0)
+    gta_chaos_flash_threshold: float = Field(default=0.015, ge=0.0, le=1.0)
+    gta_chaos_edge_threshold: float = Field(default=0.10, ge=0.0, le=1.0)
+    gta_chaos_score_threshold: float = Field(default=0.09, ge=0.0, le=1.0)
+    gta_chaos_confirm_frames: int = Field(default=2, ge=1, le=5)
+    gta_chaos_cooldown_seconds: int = Field(default=8, ge=1, le=60)
     commentary_context_frame_count: int = Field(default=5, ge=1, le=12)
     commentary_recent_event_limit: int = Field(default=5, ge=1, le=12)
 
@@ -48,6 +57,14 @@ class Settings(BaseSettings):
     grok_api_base_url: str = "https://api.x.ai/v1"
     grok_timeout_seconds: int = Field(default=60, ge=5, le=3600)
     grok_api_key: str | None = None
+    realtime_enabled: bool = False
+    realtime_ws_url: str = "wss://api.x.ai/v1/realtime"
+    realtime_api_key: str | None = None
+    realtime_personality: str = "sarcastic_coach"
+    realtime_voice: str = "leo"
+    realtime_language: str = "en"
+    realtime_emit_commentary: bool = True
+    realtime_emit_speech_cues: bool = True
 
     @property
     def sessions_dir(self) -> Path:
@@ -68,6 +85,14 @@ class Settings(BaseSettings):
     @property
     def debug_commentary_dir(self) -> Path:
         return self.data_dir / "debug_commentary"
+
+    @property
+    def debug_speech_dir(self) -> Path:
+        return self.data_dir / "debug_speech"
+
+    @property
+    def debug_realtime_dir(self) -> Path:
+        return self.data_dir / "debug_realtime"
 
 
 @lru_cache(maxsize=1)
