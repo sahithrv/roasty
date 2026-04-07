@@ -41,17 +41,31 @@ class Settings(BaseSettings):
     gta_wasted_debug_max_saves: int = Field(default=25, ge=1, le=500)
     gta_wasted_debug_save_first_n: int = Field(default=5, ge=0, le=50)
     gta_chaos_downscale_width: int = Field(default=320, ge=120, le=960)
-    gta_chaos_motion_threshold: float = Field(default=0.11, ge=0.0, le=1.0)
-    gta_chaos_flash_threshold: float = Field(default=0.015, ge=0.0, le=1.0)
-    gta_chaos_edge_threshold: float = Field(default=0.10, ge=0.0, le=1.0)
-    gta_chaos_score_threshold: float = Field(default=0.09, ge=0.0, le=1.0)
-    gta_chaos_confirm_frames: int = Field(default=2, ge=1, le=5)
-    gta_chaos_cooldown_seconds: int = Field(default=8, ge=1, le=60)
+    gta_chaos_motion_threshold: float = Field(default=0.16, ge=0.0, le=1.0)
+    gta_chaos_flash_threshold: float = Field(default=0.035, ge=0.0, le=1.0)
+    gta_chaos_edge_threshold: float = Field(default=0.18, ge=0.0, le=1.0)
+    gta_chaos_score_threshold: float = Field(default=0.20, ge=0.0, le=1.0)
+    gta_chaos_confirm_frames: int = Field(default=3, ge=1, le=5)
+    gta_chaos_cooldown_seconds: int = Field(default=20, ge=1, le=60)
     gta_chaos_startup_delay_seconds: int = Field(default=12, ge=0, le=120)
+    gta_wanted_confirm_frames: int = Field(default=3, ge=1, le=6)
+    gta_wanted_slot_activation_threshold: float = Field(default=0.20, ge=0.01, le=0.95)
+    gta_wanted_slot_present_threshold: float = Field(default=0.12, ge=0.01, le=0.95)
+    gta_wanted_shape_presence_threshold: float = Field(default=0.46, ge=0.05, le=0.99)
+    gta_wanted_active_score_threshold: float = Field(default=0.52, ge=0.05, le=0.99)
+    gta_wanted_startup_delay_seconds: int = Field(default=6, ge=0, le=120)
+    gta_wanted_roi_top_pct: float = Field(default=0.004, ge=0.0, le=0.2)
+    gta_wanted_roi_bottom_pct: float = Field(default=0.060, ge=0.01, le=0.3)
+    gta_wanted_roi_left_pct: float = Field(default=0.910, ge=0.5, le=0.99)
+    gta_wanted_roi_right_pct: float = Field(default=0.990, ge=0.7, le=1.0)
+    gta_wanted_slot_centers_pct: str = "0.125,0.308,0.491,0.674,0.864"
+    gta_wanted_slot_half_width_pct: float = Field(default=0.086, ge=0.02, le=0.25)
+    gta_wanted_slot_top_pct: float = Field(default=0.08, ge=0.0, le=0.5)
+    gta_wanted_slot_bottom_pct: float = Field(default=0.92, ge=0.2, le=1.0)
     commentary_context_frame_count: int = Field(default=5, ge=1, le=12)
     commentary_recent_event_limit: int = Field(default=5, ge=1, le=12)
 
-    default_persona: str = "light_sarcasm"
+    default_persona: str = "off_the_walls"
     commentary_enabled: bool = True
 
     grok_model: str = "grok-4-1-fast-reasoning"
@@ -61,7 +75,7 @@ class Settings(BaseSettings):
     realtime_enabled: bool = False
     realtime_ws_url: str = "wss://api.x.ai/v1/realtime"
     realtime_api_key: str | None = None
-    realtime_personality: str = "sarcastic_coach"
+    realtime_personality: str = "off_the_walls"
     realtime_voice: str = "leo"
     realtime_language: str = "en"
     realtime_play_audio: bool = True

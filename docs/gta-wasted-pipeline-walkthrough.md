@@ -31,7 +31,7 @@ the program does this:
 2. creates a new session runtime
 3. creates the live screen capture source
 4. creates the GTA `wasted` detector
-5. creates the GTA ambient `chaos_spike` detector
+5. creates the GTA `wanted stars` HUD detector
 6. creates the replay buffer
 7. subscribes workers to bus topics
 8. starts all workers concurrently with `asyncio.gather(...)`
@@ -52,9 +52,9 @@ Live Frame Capture (dxcam)
 FRAME_RAW topic
   -> replay_buffer_worker
   -> detector_worker (wasted)
-  -> detector_worker (chaos)
+  -> detector_worker (wanted stars)
   ->
-GtaWastedDetector.detect(...) and GtaChaosDetector.detect(...)
+GtaWastedDetector.detect(...) and GtaWantedStarsDetector.detect(...)
   ->
 DetectionSignal
   ->
@@ -202,7 +202,7 @@ Contains:
 
 - game
 - detector name
-- signal type, for example `wasted` or `chaos_spike`
+- signal type, for example `wasted` or `wanted_level_changed`
 - confidence score
 - ROI name
 - metadata about the detection
@@ -234,7 +234,7 @@ Contains:
 Meaning:
 
 - this is the canonical app-level event
-- both important events like `wasted` and cheap ambient events like `chaos_spike` use the same event shape
+- both important events like `wasted` and HUD/state events like `wanted_level_changed` use the same event shape
 - memory, cheap speech cues, and Grok commentary all act on this object rather than on raw detector claims
 
 ### 5. `SpeechCue`

@@ -7,7 +7,7 @@ from sg_coach.capture.replay_buffer import (
     ReplayFrameBuffer,
     replay_buffer_worker,
 )
-from sg_coach.detectors.gta.chaos import GtaChaosDetector
+from sg_coach.detectors.gta.wanted_stars import GtaWantedStarsDetector
 from sg_coach.detectors.gta.wasted import GtaWastedDetector
 from sg_coach.detectors.worker import detector_fleet_worker
 from sg_coach.fusion.demo import DemoPassthroughFuser
@@ -94,7 +94,7 @@ async def run_gta_wasted_pipeline(*, frame_count: int | None = None) -> None:
     This is now the first realistic multi-detector GTA path:
     - real live frames
     - a real heuristic `wasted` detector
-    - a cheap ambient `chaos_spike` detector
+    - a heuristic wanted-stars HUD detector
     - passthrough fusion
     - replay buffer context export on `wasted`
     - commentary request generation from event + memory + replay context
@@ -124,7 +124,7 @@ async def run_gta_wasted_pipeline(*, frame_count: int | None = None) -> None:
 
     source = DxcamFrameSource(settings=settings, game="gta_like")
     wasted_detector = GtaWastedDetector(settings=settings)
-    chaos_detector = GtaChaosDetector(settings=settings)
+    wanted_detector = GtaWantedStarsDetector(settings=settings)
     fuser = DemoPassthroughFuser()
     replay_buffer = ReplayFrameBuffer.from_settings(settings)
 
@@ -145,7 +145,7 @@ async def run_gta_wasted_pipeline(*, frame_count: int | None = None) -> None:
     realtime_speech_queue = runtime.subscribe(SPEECH_PLAY)
 
     logger.info(
-        "gta pipeline starting session_id=%s monitor_id=%s target_fps=%s frame_count=%s replay_seconds=%s wasted_template=%s wasted_threshold=%.3f chaos_threshold=%.3f commentary_frames=%s",
+        "gta pipeline starting session_id=%s monitor_id=%s target_fps=%s frame_count=%s replay_seconds=%s wasted_template=%s wasted_threshold=%.3f wanted_confirm_frames=%s commentary_frames=%s",
         runtime.session_id,
         settings.capture_monitor_id,
         settings.target_fps,
@@ -153,7 +153,7 @@ async def run_gta_wasted_pipeline(*, frame_count: int | None = None) -> None:
         settings.replay_buffer_seconds,
         settings.gta_wasted_template_path,
         settings.gta_wasted_match_threshold,
-        settings.gta_chaos_score_threshold,
+        settings.gta_wanted_confirm_frames,
         settings.commentary_context_frame_count,
     )
 
@@ -166,7 +166,7 @@ async def run_gta_wasted_pipeline(*, frame_count: int | None = None) -> None:
         detector_fleet_worker(
             runtime,
             frame_queue_detectors,
-            detectors=[wasted_detector, chaos_detector],
+            detectors=[wasted_detector, wanted_detector],
         ),
         # Convert detector signals into canonical `GameEvent` objects.
         fusion_worker(runtime, signal_queue, fuser=fuser),
@@ -185,8 +185,8 @@ async def run_gta_wasted_pipeline(*, frame_count: int | None = None) -> None:
         commentary_model_worker(commentary_request_queue, runtime=runtime),
         # Dump the actual response JSON and final line of commentary to disk.
         commentary_result_sink(commentary_result_queue, runtime=runtime),
-        # Build cheap text cues for non-Grok ambient events that a realtime layer
-        # can comment on later without spending multimodal tokens.
+        # Build cheap text cues for non-Grok HUD/state events that a realtime
+        # layer can comment on later without spending multimodal tokens.
         speech_cue_worker(runtime, speech_event_queue),
         speech_cue_sink(
             speech_queue,

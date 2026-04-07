@@ -15,23 +15,21 @@ logger = get_logger(__name__)
 
 def build_speech_cue_from_event(runtime: SessionRuntime, event: GameEvent) -> SpeechCue | None:
     """Create a cheap text cue for events that do not need a full model call."""
-    if event.event_type != "chaos_spike":
+    if event.event_type not in {"wanted_level_started", "wanted_level_changed", "wanted_level_cleared"}:
         return None
 
-    motion = float(event.metadata.get("motion_score", 0.0))
-    flash = float(event.metadata.get("flash_ratio", 0.0))
-    edge = float(event.metadata.get("edge_density", 0.0))
+    previous_level = int(event.metadata.get("previous_wanted_level", 0))
+    current_level = int(event.metadata.get("wanted_level", 0))
+    change_direction = str(event.metadata.get("change_direction", "")).strip().lower()
 
-    descriptors: list[str] = []
-    if motion >= runtime.settings.gta_chaos_motion_threshold:
-        descriptors.append("rapid movement")
-    if flash >= runtime.settings.gta_chaos_flash_threshold:
-        descriptors.append("bright flashes")
-    if edge >= runtime.settings.gta_chaos_edge_threshold:
-        descriptors.append("heavy scene clutter")
-
-    descriptor_text = ", ".join(descriptors) if descriptors else "scene turbulence"
-    text = f"Chaos spike detected: {descriptor_text} just kicked up on screen."
+    if event.event_type == "wanted_level_started":
+        text = f"Cops are on you now. Wanted level started at {current_level} stars."
+    elif event.event_type == "wanted_level_cleared":
+        text = "Wanted level cleared. The heat is off for now."
+    elif change_direction == "increase":
+        text = f"Wanted level just climbed from {previous_level} to {current_level} stars."
+    else:
+        text = f"Wanted level dropped from {previous_level} to {current_level} stars."
 
     return SpeechCue(
         session_id=runtime.session_id,
@@ -42,9 +40,10 @@ def build_speech_cue_from_event(runtime: SessionRuntime, event: GameEvent) -> Sp
             "event_type": event.event_type,
             "confidence": round(event.confidence, 4),
             "source_detector": event.metadata.get("source_detector"),
-            "motion_score": round(motion, 4),
-            "flash_ratio": round(flash, 4),
-            "edge_density": round(edge, 4),
+            "previous_wanted_level": previous_level,
+            "wanted_level": current_level,
+            "change_direction": change_direction,
+            "active_star_slots": list(event.metadata.get("active_star_slots", [])),
         },
     )
 
@@ -53,7 +52,7 @@ async def speech_cue_worker(
     runtime: SessionRuntime,
     event_queue: asyncio.Queue[GameEvent | str],
 ) -> None:
-    """Turn cheap ambient events into text cues for a future realtime layer."""
+    """Turn cheap HUD/state events into text cues for a future realtime layer."""
     last_emitted_at_by_type: dict[str, float] = {}
     loop = asyncio.get_running_loop()
 

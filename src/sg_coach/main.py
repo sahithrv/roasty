@@ -70,6 +70,7 @@ def main() -> int:
         },
     )
 
+    print("gay")
     print("Sarcastic Gaming AI Coach")
     print("==========================")
 

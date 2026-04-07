@@ -106,6 +106,9 @@ class GtaChaosDetector:
                     "motion_score": round(metrics["motion_score"], 4),
                     "flash_ratio": round(metrics["flash_ratio"], 4),
                     "edge_density": round(metrics["edge_density"], 4),
+                    "bright_ratio": round(metrics["bright_ratio"], 4),
+                    "edge_change_ratio": round(metrics["edge_change_ratio"], 4),
+                    "qualifying_signal_count": int(metrics["qualifying_signal_count"]),
                     "confirm_frames": self.settings.gta_chaos_confirm_frames,
                     "cooldown_seconds": self.settings.gta_chaos_cooldown_seconds,
                     "startup_delay_seconds": self.settings.gta_chaos_startup_delay_seconds,
@@ -130,30 +133,45 @@ class GtaChaosDetector:
         current_gray: np.ndarray,
         previous_gray: np.ndarray,
     ) -> dict[str, float]:
-        """Combine motion, flashes, and edge density into one coarse chaos score."""
+        """Combine scene-change signals into one coarse chaos score."""
         diff = cv2.absdiff(current_gray, previous_gray)
         motion_score = float(diff.mean() / 255.0)
 
         bright_pixels = current_gray >= 225
-        flash_ratio = float(np.count_nonzero(bright_pixels) / bright_pixels.size)
+        previous_bright_pixels = previous_gray >= 225
+        bright_ratio = float(np.count_nonzero(bright_pixels) / bright_pixels.size)
+        previous_bright_ratio = float(
+            np.count_nonzero(previous_bright_pixels) / previous_bright_pixels.size
+        )
+        flash_ratio = max(0.0, bright_ratio - previous_bright_ratio)
 
         edges = cv2.Canny(current_gray, 80, 180)
+        previous_edges = cv2.Canny(previous_gray, 80, 180)
         edge_density = float(np.count_nonzero(edges) / edges.size)
+        edge_change_ratio = float(np.count_nonzero(cv2.absdiff(edges, previous_edges)) / edges.size)
 
-        # Weight motion most heavily; flashes and edge density help separate
-        # calm traversal from scenes that suddenly become busy or explosive.
+        # Weight motion most heavily; sudden flashes and edge changes help
+        # distinguish actual scene escalation from GTA's naturally noisy visuals.
         chaos_score = (
-            motion_score * 0.65
-            + flash_ratio * 1.75
-            + edge_density * 0.20
+            motion_score * 0.75
+            + flash_ratio * 1.60
+            + edge_change_ratio * 0.35
         )
 
-        # Require at least one meaningful signal source so the detector does not
-        # overreact to mild camera drift.
+        qualifying_signal_count = 0
+        if motion_score >= self.settings.gta_chaos_motion_threshold:
+            qualifying_signal_count += 1
+        if flash_ratio >= self.settings.gta_chaos_flash_threshold:
+            qualifying_signal_count += 1
+        if edge_change_ratio >= self.settings.gta_chaos_edge_threshold:
+            qualifying_signal_count += 1
+
+        # Require either multiple independent change signals, or a very large
+        # motion jump, so bright skies / city lights / UI contrast do not read
+        # as chaos by themselves.
         if (
-            motion_score < self.settings.gta_chaos_motion_threshold
-            and flash_ratio < self.settings.gta_chaos_flash_threshold
-            and edge_density < self.settings.gta_chaos_edge_threshold
+            qualifying_signal_count < 2
+            and motion_score < (self.settings.gta_chaos_motion_threshold * 1.8)
         ):
             chaos_score = 0.0
 
@@ -162,4 +180,7 @@ class GtaChaosDetector:
             "motion_score": motion_score,
             "flash_ratio": flash_ratio,
             "edge_density": edge_density,
+            "bright_ratio": bright_ratio,
+            "edge_change_ratio": edge_change_ratio,
+            "qualifying_signal_count": float(qualifying_signal_count),
         }

@@ -35,6 +35,17 @@ def normalize_audio_device(device_setting: str | None) -> str | int | None:
     return normalized
 
 
+def _equivalent_special_keys(key: Any) -> set[Any]:
+    """Return equivalent pynput keys for layouts that alias one physical key."""
+    if keyboard is None:
+        return {key}
+
+    alt_gr = getattr(keyboard.Key, "alt_gr", None)
+    if alt_gr is not None and key in {keyboard.Key.alt_r, alt_gr}:
+        return {keyboard.Key.alt_r, alt_gr}
+    return {key}
+
+
 def resolve_push_to_talk_key(key_spec: str) -> Any:
     """Resolve a human-friendly key setting into a pynput key matcher target."""
     if keyboard is None:
@@ -48,6 +59,10 @@ def resolve_push_to_talk_key(key_spec: str) -> Any:
         "alt right": keyboard.Key.alt_r,
         "r alt": keyboard.Key.alt_r,
         "alt r": keyboard.Key.alt_r,
+        "altgr": getattr(keyboard.Key, "alt_gr", keyboard.Key.alt_r),
+        "alt gr": getattr(keyboard.Key, "alt_gr", keyboard.Key.alt_r),
+        "right alt gr": getattr(keyboard.Key, "alt_gr", keyboard.Key.alt_r),
+        "right altgr": getattr(keyboard.Key, "alt_gr", keyboard.Key.alt_r),
         "left alt": keyboard.Key.alt_l,
         "alt left": keyboard.Key.alt_l,
         "l alt": keyboard.Key.alt_l,
@@ -85,7 +100,7 @@ def matches_push_to_talk_key(candidate: Any, target: Any) -> bool:
         return False
 
     if isinstance(target, keyboard.Key):
-        return candidate == target
+        return candidate in _equivalent_special_keys(target)
 
     target_char = getattr(target, "char", None)
     candidate_char = getattr(candidate, "char", None)
