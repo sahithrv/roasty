@@ -28,6 +28,7 @@ dev = [
 [project.scripts]
 sg-coach = "sg_coach.main:main"
 sg-coach-test-wanted = "sg_coach.orchestrator.gta_wanted_probe:main"
+sg-coach-test-valorant = "sg_coach.orchestrator.valorant_pipeline:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sg_coach"]

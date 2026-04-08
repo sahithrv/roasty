@@ -6,6 +6,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from sg_coach.shared.game_profiles import GameProfile
+
 
 def utc_now() -> datetime:
     """Return a timezone-aware UTC timestamp."""
@@ -71,6 +73,8 @@ class CommentaryRequest(BaseModel):
 
     request_id: str = Field(default_factory=lambda: new_id("commentary"))
     persona: str
+    game_key: str = "generic"
+    game_profile: GameProfile | None = None
     latest_event: GameEvent
     recent_events: list[GameEvent] = Field(default_factory=list)
     counters: dict[str, int] = Field(default_factory=dict)

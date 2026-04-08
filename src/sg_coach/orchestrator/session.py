@@ -7,6 +7,7 @@ from sg_coach.memory.store import MemorySnapshot, SessionMemoryStore
 from sg_coach.orchestrator.bus import EventBus
 from sg_coach.orchestrator.topics import TopicName
 from sg_coach.shared.events import new_id
+from sg_coach.shared.game_profiles import GameProfile, get_game_profile
 from sg_coach.shared.settings import Settings
 
 
@@ -34,12 +35,14 @@ class SessionRuntime:
     """
 
     session_id: str
+    game_key: str
+    game_profile: GameProfile
     settings: Settings
     bus: EventBus
     memory_store: SessionMemoryStore
 
     @classmethod
-    def create(cls, settings: Settings) -> "SessionRuntime":
+    def create(cls, settings: Settings, *, game_key: str = "generic") -> "SessionRuntime":
         """Create a new runtime with fresh session-scoped dependencies.
 
         Hints:
@@ -51,7 +54,8 @@ class SessionRuntime:
         session_id = new_id("session")
         bus = EventBus()
         session_store = SessionMemoryStore(session_id)
-        return cls(session_id, settings, bus, session_store)
+        game_profile = get_game_profile(game_key)
+        return cls(session_id, game_profile.key, game_profile, settings, bus, session_store)
 
     def subscribe(self, topic: TopicName, *, maxsize: int = 0):
         """Delegate topic subscription to the session event bus.

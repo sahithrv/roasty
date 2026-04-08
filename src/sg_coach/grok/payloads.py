@@ -6,10 +6,11 @@ import mimetypes
 from pathlib import Path
 from typing import Any
 
+from sg_coach.shared.game_profiles import GameProfile
 from sg_coach.shared.events import CommentaryRequest
 
 
-def build_system_prompt(persona: str) -> str:
+def build_system_prompt(persona: str, *, game_profile: GameProfile | None = None) -> str:
     """Return the instruction block for the visual-summary stage.
 
     This model call is no longer the final voice/personality stage.
@@ -19,11 +20,12 @@ def build_system_prompt(persona: str) -> str:
     - stay grounded in the provided event context and replay frames
     - avoid any live tactical or hidden-information guidance
     """
-    return (
+    prompt = (
         "You are the visual-analysis stage for a gaming assistant. "
         "Your job is to explain what visibly happened on screen and provide one short coaching note. "
         "Do not roleplay, do not be sarcastic, and do not speak like the final companion voice. "
         "Use only visible evidence and the supplied structured context. "
+        "Use the supplied game profile as authoritative background rules for interpreting the event. "
         "The attached replay images are ordered from oldest to newest and show the lead-up to the event. "
         "Focus on the immediate cause of the event, not just the banner or end-state. "
         "Do not merely restate that the player died or that a banner appeared unless that is all that is visibly knowable. "
@@ -34,6 +36,9 @@ def build_system_prompt(persona: str) -> str:
         'where "visual_summary" is 1-2 short sentences explaining how the event likely occurred based on the replay sequence, '
         'and "coach_note" is one short after-the-fact improvement note tied to the visible mistake or risk.'
     )
+    if game_profile is not None:
+        prompt = f"{prompt} Active game: {game_profile.display_name} ({game_profile.mode_name})."
+    return prompt
 
 
 def build_user_payload(request: CommentaryRequest) -> dict[str, Any]:
@@ -48,6 +53,8 @@ def build_user_payload(request: CommentaryRequest) -> dict[str, Any]:
     latest_event = request.latest_event
     return {
         "persona": request.persona,
+        "game_key": request.game_key,
+        "game_profile": None if request.game_profile is None else request.game_profile.model_dump(mode="json"),
         "latest_event": {
             "event_type": latest_event.event_type,
             "confidence": latest_event.confidence,
@@ -134,7 +141,7 @@ def build_grok_chat_payload(request: CommentaryRequest, *, model: str) -> dict[s
         "messages": [
             {
                 "role": "system",
-                "content": build_system_prompt(request.persona),
+                "content": build_system_prompt(request.persona, game_profile=request.game_profile),
             },
             {
                 "role": "user",

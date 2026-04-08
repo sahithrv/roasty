@@ -4,6 +4,7 @@ import asyncio
 
 from sg_coach.bootstrap import bootstrap
 from sg_coach.orchestrator.gta_wasted_pipeline import run_gta_wasted_pipeline
+from sg_coach.orchestrator.valorant_pipeline import run_valorant_pipeline_demo
 from sg_coach.shared.logging import get_logger
 
 
@@ -58,6 +59,22 @@ def run_gta_session(settings) -> int:
     return 0
 
 
+def run_valorant_session() -> int:
+    """Run the first scripted Valorant state pipeline."""
+    print()
+    print("Starting Valorant scripted pipeline test.")
+    print("This validates the round-state pipeline without live detectors yet.")
+    print()
+
+    try:
+        asyncio.run(run_valorant_pipeline_demo())
+    except KeyboardInterrupt:
+        print()
+        print("Valorant scripted pipeline stopped by user.")
+        logger.info("valorant scripted pipeline stopped by user")
+    return 0
+
+
 def main() -> int:
     settings = bootstrap()
     logger.info(
@@ -70,7 +87,6 @@ def main() -> int:
         },
     )
 
-    print("gay")
     print("Sarcastic Gaming AI Coach")
     print("==========================")
 
@@ -80,10 +96,7 @@ def main() -> int:
         return 0
 
     if selection == "valorant":
-        print()
-        print("Valorant startup flow is not implemented yet.")
-        print("Choose GTA for the live detector path right now.")
-        return 0
+        return run_valorant_session()
 
     if selection == "gta":
         if not wait_for_user_ready("GTA"):

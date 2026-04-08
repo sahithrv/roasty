@@ -164,6 +164,8 @@ async def commentary_request_worker(
 
         request = CommentaryRequest(
             persona=runtime.settings.default_persona,
+            game_key=runtime.game_key,
+            game_profile=runtime.game_profile,
             latest_event=event,
             recent_events=snapshot.recent_events,
             counters=snapshot.counters,

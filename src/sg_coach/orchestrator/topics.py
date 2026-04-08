@@ -11,6 +11,7 @@ COMMENTARY_REQUEST: Final[str] = "commentary.request"
 COMMENTARY_READY: Final[str] = "commentary.ready"
 SPEECH_PLAY: Final[str] = "speech.play"
 UI_STATE: Final[str] = "ui.state"
+ROUND_PACKET_READY: Final[str] = "round.packet"
 
 
 TopicName = Literal[
@@ -22,5 +23,6 @@ TopicName = Literal[
     "commentary.ready",
     "speech.play",
     "ui.state",
+    "round.packet",
 ]
 

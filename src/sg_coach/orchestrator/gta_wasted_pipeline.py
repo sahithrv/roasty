@@ -120,7 +120,7 @@ async def run_gta_wasted_pipeline(*, frame_count: int | None = None) -> None:
       -> realtime_bridge_worker
     """
     settings = load_settings()
-    runtime = SessionRuntime.create(settings)
+    runtime = SessionRuntime.create(settings, game_key="gta")
 
     source = DxcamFrameSource(settings=settings, game="gta_like")
     wasted_detector = GtaWastedDetector(settings=settings)

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from sg_coach.orchestrator.session import SessionRuntime
 from sg_coach.realtime.client import XaiRealtimeClient
+from sg_coach.shared.game_profiles import GameProfile
 from sg_coach.shared.events import CommentaryResult, SpeechCue
 from sg_coach.shared.logging import get_logger
 from sg_coach.shared.streaming import COMMENTARY_STREAM_COMPLETE, SPEECH_STREAM_COMPLETE
@@ -36,6 +37,16 @@ def build_realtime_personality_instructions(personality: str) -> str:
     )
 
 
+def build_realtime_game_instructions(game_profile: GameProfile) -> str:
+    """Return a lightweight game-specific bootstrap for the live voice agent."""
+    return (
+        f"Selected game: {game_profile.display_name} ({game_profile.mode_name}). "
+        f"Game structure: {game_profile.structure_style}. "
+        f"Coaching posture: {game_profile.coaching_posture}. "
+        f"{game_profile.realtime_bootstrap}"
+    )
+
+
 def build_realtime_instructions(runtime: SessionRuntime) -> str:
     """Build the persistent instruction block for the voice session."""
     return (
@@ -44,6 +55,7 @@ def build_realtime_instructions(runtime: SessionRuntime) -> str:
         "Use those event messages as context for short, witty spoken reactions and callbacks. "
         "Real user speech will arrive as ordinary conversation turns later and should be treated separately. "
         "Do not claim hidden information. Keep comments concise and natural for voice. "
+        f"{build_realtime_game_instructions(runtime.game_profile)} "
         f"{build_realtime_personality_instructions(runtime.settings.realtime_personality)} "
         f"Current local memory summary: {runtime.memory_summary() or 'No prior memory yet.'}"
     )
