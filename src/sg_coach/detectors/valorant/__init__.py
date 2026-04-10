@@ -1,0 +1,1 @@
+"""Valorant-specific detector implementations."""
