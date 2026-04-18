@@ -4,8 +4,17 @@ import asyncio
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from sg_coach.detectors.valorant.map_loading import ValorantMapLoadingDetector
+from sg_coach.fusion.demo import DemoPassthroughFuser
 from sg_coach.memory.worker import memory_snapshot_sink, memory_worker
-from sg_coach.orchestrator.topics import EVENT_GAME, MEMORY_UPDATED, ROUND_PACKET_READY, UI_STATE
+from sg_coach.orchestrator.topics import (
+    EVENT_GAME,
+    FRAME_RAW,
+    MEMORY_UPDATED,
+    ROUND_PACKET_READY,
+    SIGNAL_DETECTOR,
+    UI_STATE,
+)
 from sg_coach.orchestrator.valorant_state import (
     ValorantMatchStateTracker,
     valorant_live_state_sink,
@@ -14,26 +23,43 @@ from sg_coach.orchestrator.valorant_state import (
 )
 from sg_coach.shared.events import GameEvent
 from sg_coach.shared.logging import configure_logging, get_logger
-from sg_coach.shared.streaming import EVENT_STREAM_COMPLETE
+from sg_coach.shared.streaming import EVENT_STREAM_COMPLETE, FRAME_STREAM_COMPLETE
 
 
 if TYPE_CHECKING:
+    from sg_coach.capture.dxcam_backend import DxcamFrameSource
     from sg_coach.orchestrator.session import SessionRuntime
 
 
 logger = get_logger(__name__)
 
 
+async def live_frame_producer(
+    runtime: SessionRuntime,
+    source: DxcamFrameSource,
+    *,
+    frame_count: int | None,
+) -> None:
+    """Publish real Valorant frames into the runtime bus."""
+    published = 0
+    async for frame in source.frames():
+        published += 1
+        logger.info(
+            "valorant live producer published frame %s of %s id=%s size=%sx%s",
+            published,
+            "continuous" if frame_count is None else frame_count,
+            frame.frame_id,
+            frame.width,
+            frame.height,
+        )
+        await runtime.publish(FRAME_RAW, frame)
+        if frame_count is not None and published >= frame_count:
+            break
+    await runtime.publish(FRAME_RAW, FRAME_STREAM_COMPLETE)
+
+
 def build_scripted_valorant_events(*, session_id: str) -> list[GameEvent]:
-    """Return a tiny scripted match slice used to validate the Valorant pipeline.
-
-    This intentionally bypasses CV for now. The goal is to prove:
-    - canonical Valorant events can be published
-    - the state worker updates live round state
-    - completed rounds emit `ValorantRoundPacket`
-
-    Once real detectors exist, they should emit the same event shapes.
-    """
+    """Return a tiny scripted match slice used by focused tests."""
     return [
         GameEvent(
             session_id=session_id,
@@ -167,8 +193,10 @@ async def scripted_valorant_event_producer(
     events: Sequence[GameEvent] | None = None,
     event_delay_seconds: float = 0.0,
 ) -> None:
-    """Publish a deterministic Valorant event sequence into the shared bus."""
-    scripted_events = list(events) if events is not None else build_scripted_valorant_events(session_id=runtime.session_id)
+    """Publish a deterministic event sequence into the shared bus for tests."""
+    scripted_events = list(events) if events is not None else build_scripted_valorant_events(
+        session_id=runtime.session_id
+    )
 
     for event in scripted_events:
         await runtime.publish(EVENT_GAME, event)
@@ -198,21 +226,79 @@ async def event_sink(
 
         event = item
         logger.info(
-            "%s received event type=%s round=%s confidence=%.3f",
+            "%s received event type=%s round=%s confidence=%.3f source_signals=%s",
             sink_name,
             event.event_type,
             event.metadata.get("round_number"),
             event.confidence,
+            len(event.source_signal_ids),
         )
 
 
-async def run_valorant_pipeline_demo(*, event_delay_seconds: float = 0.0) -> None:
-    """Run the first scripted Valorant state pipeline.
+async def run_valorant_pipeline(*, frame_count: int | None = None) -> None:
+    """Run the first live Valorant pipeline.
 
-    This is intentionally narrow: it validates the end-to-end state flow before
-    we commit to real HUD detectors. Real detectors should eventually replace
-    the scripted producer while keeping the same event shapes.
+    Current scope:
+    - real captured frames
+    - one real map-loading detector
+    - passthrough signal->event fusion
+    - memory updates
+    - live Valorant state updates
+
+    This keeps the first vertical slice small while still proving:
+    frame -> detector -> signal -> event -> state worker.
     """
+    from sg_coach.orchestrator.session import SessionRuntime
+    from sg_coach.shared.settings import load_settings
+    from sg_coach.capture.dxcam_backend import DxcamFrameSource
+    from sg_coach.detectors.worker import detector_worker
+    from sg_coach.fusion.worker import fusion_worker
+
+    settings = load_settings()
+    runtime = SessionRuntime.create(settings, game_key="valorant")
+
+    source = DxcamFrameSource(settings=settings, game="valorant")
+    map_detector = ValorantMapLoadingDetector(settings=settings)
+    fuser = DemoPassthroughFuser()
+    tracker = ValorantMatchStateTracker(session_id=runtime.session_id)
+
+    frame_queue_detectors = runtime.subscribe(FRAME_RAW)
+    signal_queue = runtime.subscribe(SIGNAL_DETECTOR)
+    audit_queue = runtime.subscribe(EVENT_GAME)
+    memory_event_queue = runtime.subscribe(EVENT_GAME)
+    state_event_queue = runtime.subscribe(EVENT_GAME)
+    memory_snapshot_queue = runtime.subscribe(MEMORY_UPDATED)
+    ui_queue = runtime.subscribe(UI_STATE)
+    round_packet_queue = runtime.subscribe(ROUND_PACKET_READY)
+
+    logger.info(
+        "valorant pipeline starting session_id=%s monitor_id=%s target_fps=%s frame_count=%s map_templates=%s map_threshold=%.3f confirm_frames=%s",
+        runtime.session_id,
+        settings.capture_monitor_id,
+        settings.target_fps,
+        "continuous" if frame_count is None else frame_count,
+        settings.valorant_map_templates_dir,
+        settings.valorant_map_match_threshold,
+        settings.valorant_map_confirm_frames,
+    )
+
+    await asyncio.gather(
+        live_frame_producer(runtime, source, frame_count=frame_count),
+        detector_worker(runtime, frame_queue_detectors, detector=map_detector),
+        fusion_worker(runtime, signal_queue, fuser=fuser),
+        event_sink(audit_queue, sink_name="valorant_audit_sink"),
+        memory_worker(runtime.bus, memory_event_queue, store=runtime.memory_store),
+        memory_snapshot_sink(memory_snapshot_queue),
+        valorant_state_worker(runtime, state_event_queue, tracker=tracker),
+        valorant_live_state_sink(ui_queue),
+        valorant_round_packet_sink(round_packet_queue),
+    )
+
+    logger.info("valorant pipeline finished session_id=%s", runtime.session_id)
+
+
+async def run_valorant_pipeline_demo(*, event_delay_seconds: float = 0.0) -> None:
+    """Backward-compatible scripted path used by focused tests and early demos."""
     from sg_coach.orchestrator.session import SessionRuntime
     from sg_coach.shared.settings import load_settings
 
@@ -234,10 +320,7 @@ async def run_valorant_pipeline_demo(*, event_delay_seconds: float = 0.0) -> Non
     )
 
     await asyncio.gather(
-        scripted_valorant_event_producer(
-            runtime,
-            event_delay_seconds=event_delay_seconds,
-        ),
+        scripted_valorant_event_producer(runtime, event_delay_seconds=event_delay_seconds),
         event_sink(event_queue_audit, sink_name="valorant_audit_sink"),
         memory_worker(runtime.bus, event_queue_memory, store=runtime.memory_store),
         memory_snapshot_sink(memory_snapshot_queue),
@@ -251,7 +334,7 @@ async def run_valorant_pipeline_demo(*, event_delay_seconds: float = 0.0) -> Non
 
 def main() -> None:
     configure_logging("INFO")
-    asyncio.run(run_valorant_pipeline_demo())
+    asyncio.run(run_valorant_pipeline())
 
 
 if __name__ == "__main__":

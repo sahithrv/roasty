@@ -4,7 +4,7 @@ import asyncio
 
 from sg_coach.bootstrap import bootstrap
 from sg_coach.orchestrator.gta_wasted_pipeline import run_gta_wasted_pipeline
-from sg_coach.orchestrator.valorant_pipeline import run_valorant_pipeline_demo
+from sg_coach.orchestrator.valorant_pipeline import run_valorant_pipeline
 from sg_coach.shared.logging import get_logger
 
 
@@ -60,18 +60,18 @@ def run_gta_session(settings) -> int:
 
 
 def run_valorant_session() -> int:
-    """Run the first scripted Valorant state pipeline."""
+    """Run the first live Valorant pipeline."""
     print()
-    print("Starting Valorant scripted pipeline test.")
-    print("This validates the round-state pipeline without live detectors yet.")
+    print("Starting Valorant detectors.")
+    print("This currently runs the live map-detection pipeline first.")
     print()
 
     try:
-        asyncio.run(run_valorant_pipeline_demo())
+        asyncio.run(run_valorant_pipeline(frame_count=None))
     except KeyboardInterrupt:
         print()
-        print("Valorant scripted pipeline stopped by user.")
-        logger.info("valorant scripted pipeline stopped by user")
+        print("Valorant detector session stopped by user.")
+        logger.info("valorant detector session stopped by user")
     return 0
 
 
@@ -96,6 +96,9 @@ def main() -> int:
         return 0
 
     if selection == "valorant":
+        if not wait_for_user_ready("Valorant"):
+            print("Cancelled before detectors started.")
+            return 0
         return run_valorant_session()
 
     if selection == "gta":

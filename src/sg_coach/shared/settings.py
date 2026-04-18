@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     gta_wanted_slot_top_pct: float = Field(default=0.08, ge=0.0, le=0.5)
     gta_wanted_slot_bottom_pct: float = Field(default=0.92, ge=0.2, le=1.0)
     valorant_map_templates_dir: Path = Path("data/templates/valorant/maps")
-    valorant_map_match_threshold: float = Field(default=0.62, ge=0.0, le=1.0)
+    valorant_map_match_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     valorant_map_confirm_frames: int = Field(default=2, ge=1, le=6)
     valorant_map_clear_threshold: float = Field(default=0.18, ge=0.0, le=1.0)
     valorant_map_clear_frames: int = Field(default=2, ge=1, le=10)
